@@ -48,8 +48,8 @@ class Settings(BaseSettings):
     OPENAI_MODEL: str = "gpt-4o-mini"
 
     # Turn & Silence Detection Tuning
-    SILENCE_RMS_THRESHOLD: float = 140.0  # RMS volume threshold (phone calls typically RMS 120-350)
-    SILENCE_DURATION_MS: int = 700        # Milliseconds of silence to trigger end-of-turn
+    SILENCE_RMS_THRESHOLD: float = 230.0  # RMS volume threshold (background noise ~140-190, speech >250)
+    SILENCE_DURATION_MS: int = 550        # Milliseconds of silence to trigger end-of-turn
     MIN_SPEECH_DURATION_MS: int = 250     # Minimum speech duration to prevent false triggers
 
     # Bot Persona / Greeting

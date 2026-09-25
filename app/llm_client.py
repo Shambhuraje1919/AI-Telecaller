@@ -69,8 +69,8 @@ class LLMClient:
             },
             "contents": contents,
             "generationConfig": {
-                "temperature": 0.7,
-                "maxOutputTokens": 80,  # Short telephonic replies
+                "temperature": 0.5,
+                "maxOutputTokens": 50,  # Fast conversational turns
             }
         }
 
