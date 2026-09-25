@@ -2,6 +2,8 @@ import asyncio
 import base64
 import json
 import logging
+import os
+from datetime import datetime
 from typing import List, Dict, Optional
 from fastapi import WebSocket, WebSocketDisconnect
 
@@ -35,6 +37,42 @@ class CallSession:
         self.pcm_audio_buffer: bytearray = bytearray()
         self.has_spoken: bool = False
         self.silence_accumulated_ms: float = 0.0
+
+    def save_transcript(self):
+        """Save conversation transcript to transcripts/ directory."""
+        if not self.conversation_history or len(self.conversation_history) <= 1:
+            return
+
+        try:
+            transcripts_dir = os.path.join(os.getcwd(), "transcripts")
+            os.makedirs(transcripts_dir, exist_ok=True)
+
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            filename_base = f"call_{timestamp}_{self.call_sid or 'unknown'}"
+
+            # 1. Save JSON
+            json_path = os.path.join(transcripts_dir, f"{filename_base}.json")
+            data = {
+                "call_sid": self.call_sid,
+                "stream_sid": self.stream_sid,
+                "timestamp": timestamp,
+                "turns_count": len(self.conversation_history),
+                "history": self.conversation_history
+            }
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+
+            # 2. Save readable text file
+            txt_path = os.path.join(transcripts_dir, f"{filename_base}.txt")
+            with open(txt_path, "w", encoding="utf-8") as f:
+                f.write(f"=== Call Transcript: {timestamp} (SID: {self.call_sid}) ===\n\n")
+                for turn in self.conversation_history:
+                    speaker = "प्रिया (Priya)" if turn["role"] == "assistant" else "ग्राहक (Customer)"
+                    f.write(f"{speaker}: {turn['content']}\n")
+
+            logger.info(f"Transcript saved to {txt_path} and {json_path}")
+        except Exception as e:
+            logger.error(f"Failed to save transcript: {e}")
 
     async def speak_text(self, text: str):
         """Synthesize text via Sarvam TTS and stream audio frames to Twilio."""
@@ -213,3 +251,4 @@ async def twilio_media_stream_handler(websocket: WebSocket):
         logger.error(f"WebSocket error: {e}", exc_info=True)
     finally:
         logger.info("Cleaning up session.")
+        session.save_transcript()
