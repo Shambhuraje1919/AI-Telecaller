@@ -8,8 +8,23 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 
+def calculate_natural_pace(text: str) -> float:
+    """
+    Vary speech pace dynamically to avoid the robotic monotonous fixed-speed effect:
+    - Questions / inquiries ending with '?' or 'का': 0.95 (thoughtful, respectful, slightly slower)
+    - Short confirmations ('हो', 'नक्कीच', 'चालेल'): 0.96
+    - Informative statements: 0.98 (confident, crisp)
+    """
+    stripped = text.strip()
+    if stripped.endswith("?") or stripped.endswith("का") or stripped.endswith("का?"):
+        return 0.95
+    if len(stripped.split()) <= 4:
+        return 0.96
+    return 0.98
+
+
 def clean_spoken_text(text: str) -> str:
-    """Sanitize text so Sarvam TTS pronounces Marathi cleanly without glitching on markdown or symbols."""
+    """Sanitize and format text so Sarvam TTS pronounces Marathi cleanly with human micro-pauses."""
     if not text:
         return ""
     # Remove markdown symbols and brackets
@@ -18,6 +33,18 @@ def clean_spoken_text(text: str) -> str:
     t = t.replace('"', '').replace("'", "")
     # Replace hyphens between numbers with 'ते' (e.g. 1600-3500 -> 1600 ते 3500)
     t = re.sub(r'(\d+)\s*-\s*(\d+)', r'\1 ते \2', t)
+
+    # Inject breathing commas after common bridge words if comma is missing
+    bridge_words = [
+        (r'^(नमस्ते सर|नमस्ते मॅडम|नमस्ते)\s*(?!,)', r'\1, '),
+        (r'^(नक्कीच सर|नक्कीच)\s*(?!,)', r'\1, '),
+        (r'^(चालेल सर|चालेल)\s*(?!,)', r'\1, '),
+        (r'^(हो सर|हो नक्कीच)\s*(?!,)', r'\1, '),
+        (r'^(काही हरकत नाही सर|काही हरकत नाही)\s*(?!,)', r'\1, '),
+    ]
+    for pattern, repl in bridge_words:
+        t = re.sub(pattern, repl, t)
+
     # Collapse multiple whitespaces
     t = re.sub(r'\s+', ' ', t).strip()
     return t
@@ -103,7 +130,7 @@ class SarvamClient:
             "inputs": [cleaned_text],
             "target_language_code": lang,
             "speaker": speaker_name,
-            "pace": 0.98,
+            "pace": calculate_natural_pace(cleaned_text),
             "speech_sample_rate": 8000,
             "enable_preprocessing": True,
             "model": settings.SARVAM_TTS_MODEL,
