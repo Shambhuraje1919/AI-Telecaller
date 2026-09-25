@@ -1,0 +1,23 @@
+# Python environments & dependencies
+venv/
+.venv/
+env/
+ENV/
+
+# Secrets and environment variables
+.env
+
+# Python byte-code / cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Operating system artifacts
+.DS_Store
+Thumbs.db
+
+# Temporary logs & test artifacts
+*.log
+.system_generated/
