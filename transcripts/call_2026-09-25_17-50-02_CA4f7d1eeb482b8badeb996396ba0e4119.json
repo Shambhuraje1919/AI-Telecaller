@@ -1,0 +1,52 @@
+{
+  "call_sid": "CA4f7d1eeb482b8badeb996396ba0e4119",
+  "stream_sid": "MZ78be5d8a813a30b77c80fe17b789ce08",
+  "timestamp": "2026-09-25_17-50-02",
+  "turns_count": 11,
+  "history": [
+    {
+      "role": "assistant",
+      "content": "नमस्ते सर, मी प्रिया बोलतेय Lok8 Brookside मधून. 2 मिनिटं वेळ आहे का?"
+    },
+    {
+      "role": "user",
+      "content": "हो आपण बोलू शकतो"
+    },
+    {
+      "role": "assistant",
+      "content": "छान सर, तुम्ही प्लॉट रेसिडेन्शियल पर्पजसाठी बघताय की इन्व्हेस्टमेंटसाठी?"
+    },
+    {
+      "role": "user",
+      "content": "और इस से सेल्फ पर्पस की"
+    },
+    {
+      "role": "assistant",
+      "content": "नक्कीच सर, साऊथ नागपूरमध्ये स्वतःच्या घरासाठी प्लॉट्स खूप छान आहेत."
+    },
+    {
+      "role": "user",
+      "content": "हो"
+    },
+    {
+      "role": "assistant",
+      "content": "आपल्याला अंदाजे किती स्क्वेअर फूटचा प्लॉट हवा आहे सर?"
+    },
+    {
+      "role": "user",
+      "content": "2000."
+    },
+    {
+      "role": "assistant",
+      "content": "२००० स्क्वेअर फुटांचे खूप छान प्लॉट्स उपलब्ध आहेत इथे."
+    },
+    {
+      "role": "user",
+      "content": "हो."
+    },
+    {
+      "role": "assistant",
+      "content": "आपण या वीकेंडला साईट व्हिजिट प्लॅन करूया का सर?"
+    }
+  ]
+}

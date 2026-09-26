@@ -1,5 +1,9 @@
 import os
+import logging
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import field_validator
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -12,6 +16,10 @@ class Settings(BaseSettings):
     # Server & Networking
     PUBLIC_HOSTNAME: str = "localhost:8000"
     PORT: int = 8000
+
+    # Logging
+    LOG_LEVEL: str = "INFO"
+    LOG_FORMAT: str = "json"  # "json" or "text"
 
     # Twilio Configuration
     TWILIO_ACCOUNT_SID: str = ""
@@ -48,9 +56,21 @@ class Settings(BaseSettings):
     OPENAI_MODEL: str = "gpt-4o-mini"
 
     # Turn & Silence Detection Tuning
-    SILENCE_RMS_THRESHOLD: float = 230.0  # RMS volume threshold (background noise ~140-190, speech >250)
-    SILENCE_DURATION_MS: int = 550        # Milliseconds of silence to trigger end-of-turn
-    MIN_SPEECH_DURATION_MS: int = 250     # Minimum speech duration to prevent false triggers
+    SILENCE_RMS_THRESHOLD: float = 230.0
+    SILENCE_DURATION_MS: int = 550
+    MIN_SPEECH_DURATION_MS: int = 250
+
+    # Production Settings
+    MAX_CALL_DURATION_SECONDS: int = 300  # 5 min auto-hangup safety
+    MAX_CONCURRENT_CALLS: int = 50
+    CALLING_HOURS_START: int = 9   # 9 AM IST
+    CALLING_HOURS_END: int = 21    # 9 PM IST
+    ENFORCE_CALLING_HOURS: bool = True
+    RATE_LIMIT_CALLS_PER_MINUTE: int = 30
+
+    # Retry Settings
+    API_RETRY_ATTEMPTS: int = 3
+    API_RETRY_BACKOFF: float = 0.5  # seconds, multiplied by attempt number
 
     # Bot Persona / Greeting
     GREETING_MESSAGE: str = (
@@ -132,6 +152,30 @@ class Settings(BaseSettings):
         "- MahaRERA: PP1190002501455\n"
         "- Amenities: 1km riverfront promenade, 10,000+ trees, Meander clubhouse, sports courts, pool, gym, 24/7 security\n"
     )
+
+    def validate_required_settings(self) -> list[str]:
+        """Validate required settings on startup. Returns list of errors."""
+        errors = []
+        if not self.TWILIO_ACCOUNT_SID:
+            errors.append("TWILIO_ACCOUNT_SID is required")
+        if not self.TWILIO_AUTH_TOKEN:
+            errors.append("TWILIO_AUTH_TOKEN is required")
+        if not self.TWILIO_PHONE_NUMBER:
+            errors.append("TWILIO_PHONE_NUMBER is required")
+        if not self.SARVAM_API_KEY:
+            errors.append("SARVAM_API_KEY is required")
+        
+        provider = self.LLM_PROVIDER.lower()
+        if provider == "gemini" and not self.GEMINI_API_KEY:
+            errors.append("GEMINI_API_KEY is required when LLM_PROVIDER=gemini")
+        elif provider == "together" and not self.TOGETHER_API_KEY:
+            errors.append("TOGETHER_API_KEY is required when LLM_PROVIDER=together")
+        elif provider == "groq" and not self.GROQ_API_KEY:
+            errors.append("GROQ_API_KEY is required when LLM_PROVIDER=groq")
+        elif provider == "openai" and not self.OPENAI_API_KEY:
+            errors.append("OPENAI_API_KEY is required when LLM_PROVIDER=openai")
+        
+        return errors
 
 
 settings = Settings()

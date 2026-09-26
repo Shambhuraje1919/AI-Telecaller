@@ -1,18 +1,75 @@
 import logging
+import json
+import asyncio
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, Request, Response, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from twilio.rest import Client
 
 from app.config import settings
-from app.telecaller import twilio_media_stream_handler
+from app.telecaller import twilio_media_stream_handler, active_sessions
+from app.middleware import RequestIDMiddleware, RateLimitMiddleware, is_within_calling_hours, get_next_calling_window
+from app.sarvam_client import sarvam_client
+from app.llm_client import llm_client
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-)
+class JSONFormatter(logging.Formatter):
+    def format(self, record):
+        log_obj = {
+            "time": self.formatTime(record, self.datefmt),
+            "level": record.levelname,
+            "name": record.name,
+            "message": record.getMessage(),
+        }
+        if hasattr(record, "call_sid") and record.call_sid:
+            log_obj["call_sid"] = record.call_sid
+        if hasattr(record, "stream_sid") and record.stream_sid:
+            log_obj["stream_sid"] = record.stream_sid
+        return json.dumps(log_obj)
+
+log_level = logging.INFO
+if hasattr(settings, 'LOG_LEVEL'):
+    log_level = getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO)
+
+handler = logging.StreamHandler()
+handler.setFormatter(JSONFormatter())
+logging.basicConfig(level=log_level, handlers=[handler])
 logger = logging.getLogger("ai_telecaller")
 
-app = FastAPI(title="AI Telecaller Prototype", version="1.0.0")
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("Application starting up...")
+    # Validate critical config
+    if not settings.PUBLIC_HOSTNAME:
+        logger.warning("PUBLIC_HOSTNAME not set!")
+    yield
+    logger.info("Application shutting down...")
+    # Cleanup clients if needed
+    if hasattr(sarvam_client, "close"):
+        await sarvam_client.close()
+    if hasattr(llm_client, "close"):
+        await llm_client.close()
+
+
+app = FastAPI(title="AI Telecaller Prototype", version="1.0.0", lifespan=lifespan)
+
+app.add_middleware(RequestIDMiddleware)
+app.add_middleware(RateLimitMiddleware)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    return response
 
 @app.get("/health")
 async def health_check():
@@ -20,7 +77,16 @@ async def health_check():
         "status": "online",
         "llm_provider": settings.LLM_PROVIDER,
         "stt_speaker": settings.SARVAM_TTS_SPEAKER,
-        "public_hostname": settings.PUBLIC_HOSTNAME
+        "public_hostname": settings.PUBLIC_HOSTNAME,
+        "active_calls": len(active_sessions)
+    }
+
+@app.get("/metrics")
+async def metrics():
+    # Simple metrics endpoint
+    return {
+        "active_calls": len(active_sessions),
+        # You could expose total call counts and latency averages if tracked globally
     }
 
 
@@ -64,6 +130,10 @@ async def trigger_outbound_call(to: str):
     Triggers an outbound phone call using Twilio REST API.
     Example: POST or GET /call?to=+919876543210
     """
+    if not is_within_calling_hours():
+        next_window = get_next_calling_window()
+        raise HTTPException(status_code=403, detail=f"Outside TRAI calling hours. Next window at {next_window}.")
+
     if not settings.TWILIO_ACCOUNT_SID or not settings.TWILIO_AUTH_TOKEN:
         raise HTTPException(
             status_code=400,
@@ -100,7 +170,7 @@ async def trigger_outbound_call(to: str):
         }
     except Exception as e:
         logger.error(f"Failed to place call to {to}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to place call: {str(e)}")
 
 
 if __name__ == "__main__":
