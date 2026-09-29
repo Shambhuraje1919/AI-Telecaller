@@ -44,8 +44,18 @@ def clean_spoken_text(text: str) -> str:
         (r'^(हो सर|हो नक्कीच)\s*(?!,)', r'\1, '),
         (r'^(काही हरकत नाही सर|काही हरकत नाही)\s*(?!,)', r'\1, '),
     ]
-    for pattern, repl in bridge_words:
-        t = re.sub(pattern, repl, t)
+    # Convert domain dots to ' डॉट ' (e.g. lok8.me -> lok8 डॉट me)
+    t = re.sub(r'([a-zA-Z0-9]+)\.([a-zA-Z]+)', r'\1 डॉट \2', t)
+    # Replace literal 'बिंदू' if spoken for dots in web addresses
+    t = re.sub(r'\bबिंदू\b', 'डॉट', t)
+    # Expand 'किमी' / 'km' to 'किलोमीटर' so TTS never says 'kimi'
+    t = re.sub(r'कि\.?मी\.?', 'किलोमीटर', t)
+    t = re.sub(r'(\d+)\s*(km|kms)\b', r'\1 किलोमीटर', t, flags=re.IGNORECASE)
+    t = re.sub(r'\b(km|kms)\b', 'किलोमीटर', t, flags=re.IGNORECASE)
+    # Expand 'sq ft' / 'sqft' / 'sq.ft' to 'स्क्वेअर फूट'
+    t = re.sub(r'(\d+)\s*(sq\.?\s*ft|sqft)\b', r'\1 स्क्वेअर फूट', t, flags=re.IGNORECASE)
+    # Expand 'ft' to 'फूट'
+    t = re.sub(r'(\d+)\s*(ft|feet)\b', r'\1 फूट', t, flags=re.IGNORECASE)
 
     # Collapse multiple whitespaces
     t = re.sub(r'\s+', ' ', t).strip()

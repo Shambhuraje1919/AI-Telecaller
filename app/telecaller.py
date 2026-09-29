@@ -19,6 +19,7 @@ from app.audio import (
     chunk_mulaw_frames,
 )
 from app.sarvam_client import sarvam_client
+from app.cartesia_client import cartesia_client
 from app.llm_client import llm_client
 
 logger = logging.getLogger(__name__)
@@ -39,8 +40,10 @@ class CallSession:
         # Conversation state
         self.conversation_history: List[Dict[str, str]] = []
         self.is_speaking: bool = False
+        self.is_playing_audio: bool = False
         self.is_processing: bool = False
         self.interrupted: bool = False
+        self.barge_in_voice_frames: int = 0
 
         # Inbound audio tracking (PCM 8kHz)
         self.pcm_audio_buffer: bytearray = bytearray()
@@ -121,64 +124,125 @@ class CallSession:
             self.log_with_context(logging.ERROR, f"Error sending clear event: {e}")
 
     async def speak_text(self, text: str):
-        """Synthesize text via Sarvam TTS and stream audio frames to Twilio."""
+        """Synthesize text via Cartesia or Sarvam and stream audio frames to Twilio."""
         if not text or not self.stream_sid:
             return
 
-        self.is_speaking = True
         self.interrupted = False
-        self.log_with_context(logging.INFO, f"Bot speaking: '{text}'")
+        self.is_speaking = True
+        self.log_with_context(logging.INFO, f"Bot preparing speech: '{text}'")
+
+        def _ws_connected() -> bool:
+            """Safe WebSocket connection check using enum comparison."""
+            try:
+                from starlette.websockets import WebSocketState
+                return (
+                    self.ws is not None
+                    and self.ws.client_state == WebSocketState.CONNECTED
+                )
+            except Exception:
+                return self.ws is not None
 
         try:
             start_tts = time.time()
-            # 1. Generate audio with Sarvam TTS
-            tts_wav_bytes = await sarvam_client.text_to_speech(text)
-            self.metrics["tts_latency"].append(time.time() - start_tts)
+            mulaw_audio = None
 
-            if not tts_wav_bytes:
+            # 1. Synthesize audio via Cartesia or Sarvam
+            if getattr(settings, "TTS_PROVIDER", "cartesia").lower() == "cartesia":
+                # Cartesia produces raw 8kHz mu-law audio directly — no conversion needed!
+                mulaw_audio = await cartesia_client.text_to_speech(text)
+                self.metrics["tts_latency"].append(time.time() - start_tts)
+                if not mulaw_audio:
+                    self.log_with_context(logging.WARNING, "Cartesia TTS returned empty, falling back to Sarvam...")
+                    tts_wav_bytes = await sarvam_client.text_to_speech(text)
+                    if tts_wav_bytes:
+                        mulaw_audio = wav_to_mulaw_8k(tts_wav_bytes)
+            else:
+                # Sarvam TTS
+                tts_wav_bytes = await sarvam_client.text_to_speech(text)
+                self.metrics["tts_latency"].append(time.time() - start_tts)
+                if tts_wav_bytes:
+                    mulaw_audio = wav_to_mulaw_8k(tts_wav_bytes)
+
+            if not mulaw_audio:
                 self.log_with_context(logging.ERROR, "TTS returned empty audio.")
                 return
 
-            # 2. Convert to 8kHz mu-law audio
-            mulaw_audio = wav_to_mulaw_8k(tts_wav_bytes)
-            if not mulaw_audio:
-                self.log_with_context(logging.ERROR, "Failed to convert TTS audio to 8kHz mu-law.")
+            # Guard: check WebSocket is still alive before starting playback
+            if not _ws_connected():
+                self.log_with_context(logging.INFO, "Call disconnected before playback could start.")
                 return
 
-            # 3. Stream in 20ms frames (160 bytes)
-            frames = chunk_mulaw_frames(mulaw_audio, chunk_size=160)
-            for frame in frames:
+            # 2. Begin playback
+            self.is_playing_audio = True
+            self.interrupted = False
+            self.barge_in_voice_frames = 0
+            self.log_with_context(logging.INFO, f"Bot started playing audio ({len(mulaw_audio)} bytes, ~{len(mulaw_audio)/8000:.1f}s)")
+
+            # 3. Stream in 40ms frames (320 bytes @ 8kHz mu-law) for smooth delivery without jitter/underrun
+            CHUNK_SIZE = 320  # 40ms per chunk (8000 * 0.040)
+            FRAME_DURATION = CHUNK_SIZE / 8000.0  # 0.040s
+            frames = chunk_mulaw_frames(mulaw_audio, chunk_size=CHUNK_SIZE)
+
+            # Send first 4 frames (~160ms) as initial burst to fill Twilio's jitter buffer
+            BURST_COUNT = 4
+            start_time = time.monotonic()
+
+            for i, frame in enumerate(frames):
                 if self.interrupted:
                     self.log_with_context(logging.INFO, "Playback interrupted by barge-in")
+                    break
+
+                if not _ws_connected():
+                    self.log_with_context(logging.INFO, "WebSocket disconnected mid-playback")
                     break
 
                 payload = base64.b64encode(frame).decode("utf-8")
                 media_message = {
                     "event": "media",
                     "streamSid": self.stream_sid,
-                    "media": {
-                        "payload": payload
-                    }
+                    "media": {"payload": payload}
                 }
-                await self.ws.send_text(json.dumps(media_message))
-                await asyncio.sleep(0.018)
+                try:
+                    await self.ws.send_text(json.dumps(media_message))
+                except Exception:
+                    # WebSocket closed while streaming — stop silently
+                    break
 
-            if not self.interrupted:
-                # Send a mark event indicating completion of speech
+                # Drift-compensating pacing:
+                # Frames past initial burst are paced relative to wall-clock time
+                if i >= BURST_COUNT:
+                    target_time = start_time + ((i - BURST_COUNT + 1) * FRAME_DURATION)
+                    delay = target_time - time.monotonic()
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    else:
+                        await asyncio.sleep(0)  # Yield without delaying if running behind
+                else:
+                    await asyncio.sleep(0)
+
+            if not self.interrupted and _ws_connected():
                 mark_message = {
                     "event": "mark",
                     "streamSid": self.stream_sid,
-                    "mark": {
-                        "name": "speech_done"
-                    }
+                    "mark": {"name": "speech_done"}
                 }
-                await self.ws.send_text(json.dumps(mark_message))
+                try:
+                    await self.ws.send_text(json.dumps(mark_message))
+                except Exception:
+                    pass
 
         except Exception as e:
             self.log_with_context(logging.ERROR, f"Error while speaking text: {e}")
         finally:
             self.is_speaking = False
+            self.is_playing_audio = False
             self.interrupted = False
+            self.barge_in_voice_frames = 0
+            # Discard any audio that was buffered DURING playback (it's echo of Priya's voice)
+            self.pcm_audio_buffer.clear()
+            self.has_spoken = False
+            self.silence_accumulated_ms = 0.0
 
     async def handle_customer_speech_end(self):
         """Triggered when Voice Activity Detection detects the customer has stopped speaking."""
@@ -242,13 +306,25 @@ class CallSession:
 
         frame_duration_ms = (len(mulaw_bytes) / 8000.0) * 1000.0
 
-        if rms > settings.SILENCE_RMS_THRESHOLD:
-            # Voice detected
-            if self.is_speaking and not self.interrupted:
-                self.log_with_context(logging.INFO, "Barge-in detected!")
-                self.interrupted = True
-                await self._send_clear_event()
+        if self.is_playing_audio:
+            # ── During bot playback: only allow barge-in for VERY loud sustained voice ──
+            # Twilio echoes bot audio back as incoming media — ignore unless it's clearly
+            # a real human voice interrupting (much higher RMS threshold, more frames required)
+            BARGE_IN_RMS_THRESHOLD = settings.SILENCE_RMS_THRESHOLD * 5  # 5× normal (e.g. ~1150)
+            if rms > BARGE_IN_RMS_THRESHOLD and not self.interrupted:
+                self.barge_in_voice_frames += 1
+                if self.barge_in_voice_frames >= 8:  # ~160ms of very loud sustained voice
+                    self.log_with_context(logging.INFO, f"Barge-in confirmed (RMS: {rms:.0f}, threshold: {BARGE_IN_RMS_THRESHOLD:.0f})")
+                    self.interrupted = True
+                    self.has_spoken = False
+                    self.pcm_audio_buffer.clear()
+                    await self._send_clear_event()
+            else:
+                self.barge_in_voice_frames = 0
+            return  # Do NOT accumulate audio buffer during playback
 
+        if rms > settings.SILENCE_RMS_THRESHOLD:
+            # Voice detected (we know is_playing_audio=False here due to early return above)
             if not self.has_spoken:
                 self.log_with_context(logging.INFO, f"User voice started (RMS: {rms:.0f} > {settings.SILENCE_RMS_THRESHOLD})")
             self.has_spoken = True
@@ -256,6 +332,7 @@ class CallSession:
             self.pcm_audio_buffer.extend(pcm_bytes)
         else:
             # Silence detected
+            self.barge_in_voice_frames = 0
             if self.has_spoken:
                 self.silence_accumulated_ms += frame_duration_ms
                 self.pcm_audio_buffer.extend(pcm_bytes)
@@ -265,12 +342,13 @@ class CallSession:
                     self.silence_accumulated_ms >= settings.SILENCE_DURATION_MS
                     and total_duration_ms >= settings.MIN_SPEECH_DURATION_MS
                 ) or total_duration_ms >= 15000:
-                    self.log_with_context(logging.INFO,
-                        f"User voice ended (duration: {total_duration_ms:.0f}ms, silence: {self.silence_accumulated_ms:.0f}ms). Sending to STT..."
-                    )
-                    
                     if not self.is_processing:
+                        self.log_with_context(logging.INFO,
+                            f"User voice ended (duration: {total_duration_ms:.0f}ms, silence: {self.silence_accumulated_ms:.0f}ms). Sending to STT..."
+                        )
                         self.is_processing = True
+                        self.has_spoken = False
+                        self.silence_accumulated_ms = 0.0
                         asyncio.create_task(self.handle_customer_speech_end())
 
 
@@ -304,7 +382,8 @@ async def twilio_media_stream_handler(websocket: WebSocket):
                 session._hangup_task = asyncio.create_task(session._auto_hangup())
                 session.log_with_context(logging.INFO, f"Call started. StreamSid={session.stream_sid}, CallSid={session.call_sid}")
 
-                # Speak greeting message
+                # Speak greeting concurrently — DO NOT block the receive loop
+                # (blocking causes Twilio's buffered packets to flood all at once when we resume)
                 greeting = settings.GREETING_MESSAGE
                 session.conversation_history.append({"role": "assistant", "content": greeting})
                 asyncio.create_task(session.speak_text(greeting))

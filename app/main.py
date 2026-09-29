@@ -10,6 +10,7 @@ from app.config import settings
 from app.telecaller import twilio_media_stream_handler, active_sessions
 from app.middleware import RequestIDMiddleware, RateLimitMiddleware, is_within_calling_hours, get_next_calling_window
 from app.sarvam_client import sarvam_client
+from app.cartesia_client import cartesia_client
 from app.llm_client import llm_client
 
 class JSONFormatter(logging.Formatter):
@@ -42,11 +43,21 @@ async def lifespan(app: FastAPI):
     # Validate critical config
     if not settings.PUBLIC_HOSTNAME:
         logger.warning("PUBLIC_HOSTNAME not set!")
+
+    # Pre-warm Cartesia HTTP connection so first call greeting is instant
+    try:
+        await cartesia_client._get_client()
+        logger.info("Cartesia HTTP connection pre-warmed ✅")
+    except Exception as e:
+        logger.warning(f"Cartesia pre-warm failed (will retry on first call): {e}")
+
     yield
     logger.info("Application shutting down...")
     # Cleanup clients if needed
     if hasattr(sarvam_client, "close"):
         await sarvam_client.close()
+    if hasattr(cartesia_client, "close"):
+        await cartesia_client.close()
     if hasattr(llm_client, "close"):
         await llm_client.close()
 
@@ -76,17 +87,19 @@ async def health_check():
     return {
         "status": "online",
         "llm_provider": settings.LLM_PROVIDER,
-        "stt_speaker": settings.SARVAM_TTS_SPEAKER,
+        "tts_provider": getattr(settings, "TTS_PROVIDER", "cartesia"),
+        "cartesia_voice_id": settings.CARTESIA_VOICE_ID,
         "public_hostname": settings.PUBLIC_HOSTNAME,
         "active_calls": len(active_sessions)
     }
 
 @app.get("/metrics")
 async def metrics():
-    # Simple metrics endpoint
     return {
         "active_calls": len(active_sessions),
-        # You could expose total call counts and latency averages if tracked globally
+        "cartesia_metrics": cartesia_client.get_metrics(),
+        "sarvam_metrics": sarvam_client.get_metrics(),
+        "llm_metrics": llm_client.get_metrics()
     }
 
 

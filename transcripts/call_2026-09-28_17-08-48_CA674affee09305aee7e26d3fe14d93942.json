@@ -1,0 +1,32 @@
+{
+  "call_sid": "CA674affee09305aee7e26d3fe14d93942",
+  "stream_sid": "MZ37c36f451ee3629b227bb94f832f2626",
+  "timestamp": "2026-09-28_17-08-48",
+  "turns_count": 3,
+  "history": [
+    {
+      "role": "assistant",
+      "content": "नमस्ते सर, मी प्रिया बोलतेय Lok8 Brookside मधून. 2 मिनिटं वेळ आहे का?"
+    },
+    {
+      "role": "user",
+      "content": "काय आहे ना?"
+    },
+    {
+      "role": "assistant",
+      "content": "माफ करा सर, एक मिनिट थांबा."
+    }
+  ],
+  "metrics": {
+    "stt_latency": [
+      1.0196490287780762
+    ],
+    "llm_latency": [
+      0.00025010108947753906
+    ],
+    "tts_latency": [
+      1.0615899562835693,
+      0.4258759021759033
+    ]
+  }
+}

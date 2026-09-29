@@ -7,7 +7,7 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-MAX_HISTORY_TURNS = 20  # Prevent token overflow
+MAX_HISTORY_TURNS = 6  # Keep last 3 user + 3 bot turns for token efficiency and TPM headroom
 
 
 class LLMClient:
@@ -39,11 +39,19 @@ class LLMClient:
             return history[-MAX_HISTORY_TURNS:]
         return history
 
-    async def _retry_call(self, func, max_attempts: int = 3, base_delay: float = 0.5) -> str:
+    async def _retry_call(self, func, max_attempts: int = 3, base_delay: float = 0.7) -> str:
         last_error = None
         for attempt in range(1, max_attempts + 1):
             try:
                 return await func()
+            except httpx.HTTPStatusError as e:
+                last_error = e
+                if e.response.status_code == 429 and attempt < max_attempts:
+                    # Token bucket rate limit: wait 700ms for Groq's 600ms reset window to clear
+                    logger.warning(f"LLM rate limited (attempt {attempt}/{max_attempts}), retrying in 700ms...")
+                    await asyncio.sleep(0.7)
+                    continue
+                raise
             except Exception as e:
                 last_error = e
                 if attempt < max_attempts:
@@ -77,26 +85,46 @@ class LLMClient:
                 self._latencies.append(time.time() - start)
                 return result
             except Exception as e:
-                logger.warning(f"Provider '{provider_name}' failed: {e}")
                 last_error = e
+                logger.warning(f"LLM provider {provider_name} failed: {e}. Trying fallback...")
                 continue
 
         self._error_count += 1
         logger.error(f"All LLM providers failed. Last error: {last_error}")
-        return "माफ करा सर, एक मिनिट थांबा."  # Fallback Marathi: "Sorry sir, wait a minute"
+
+        # Check last user utterance for closing/thank you intent
+        last_user_msg = ""
+        for msg in reversed(history):
+            if msg.get("role") == "user":
+                last_user_msg = msg.get("content", "").lower()
+                break
+
+        closing_keywords = ["थँक्यू", "thank", "ओके", "ok", "बाय", "bye", "चालेल", "chalel"]
+        if any(w in last_user_msg for w in closing_keywords):
+            return "वेलकम सर, धन्यवाद आणि आपला दिवस चांगला जावो!"
+
+        return "माफ करा सर, आवाज अडकला होता. आपण काय म्हणालात?"
 
     def _get_provider_order(self):
         """Return ordered list of (name, callable) based on configured primary + available fallbacks."""
+        PLACEHOLDER_PREFIXES = ("your_", "sk-placeholder")
+
+        def is_valid_key(k: str) -> bool:
+            if not k or len(k) < 8:
+                return False
+            kl = k.lower()
+            return not any(kl.startswith(p) for p in PLACEHOLDER_PREFIXES)
+
         all_providers = [
+            ("groq", self._call_groq, settings.GROQ_API_KEY),
             ("gemini", self._call_gemini, settings.GEMINI_API_KEY),
             ("together", self._call_together, settings.TOGETHER_API_KEY),
-            ("groq", self._call_groq, settings.GROQ_API_KEY),
             ("openai", self._call_openai, settings.OPENAI_API_KEY),
         ]
         # Primary provider first
-        primary = [(n, f) for n, f, k in all_providers if n == self.provider and k]
-        # Then others with keys configured
-        fallbacks = [(n, f) for n, f, k in all_providers if n != self.provider and k]
+        primary = [(n, f) for n, f, k in all_providers if n == self.provider and is_valid_key(k)]
+        # Then others with valid keys configured (excluding primary)
+        fallbacks = [(n, f) for n, f, k in all_providers if n != self.provider and is_valid_key(k)]
         return primary + fallbacks
 
     async def _call_gemini(self, history: List[Dict[str, str]]) -> str:
@@ -134,17 +162,42 @@ class LLMClient:
             "contents": contents,
             "generationConfig": {
                 "temperature": 0.5,
-                "maxOutputTokens": 50,  # Fast conversational turns
+                "maxOutputTokens": 400,
+                "thinkingConfig": {
+                    "thinkingBudget": 0  # Disable thinking tokens to eliminate latency and preserve full token budget
+                }
             }
         }
 
+        models_to_try = [settings.GEMINI_MODEL]
+        if "gemini-2.5-flash" not in models_to_try:
+            models_to_try.append("gemini-2.5-flash")
+
         client = await self._get_client()
-        response = await client.post(url, json=payload)
-        response.raise_for_status()
-        data = response.json()
-        reply = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-        logger.info(f"Gemini LLM reply: '{reply}'")
-        return reply
+        last_exc = None
+        for m in models_to_try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={api_key}"
+            try:
+                response = await client.post(url, json=payload)
+                response.raise_for_status()
+                data = response.json()
+                reply = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                logger.info(f"Gemini ({m}) LLM reply: '{reply}'")
+                return reply
+            except httpx.HTTPStatusError as e:
+                last_exc = e
+                if e.response.status_code in (503, 404, 429) and m != models_to_try[-1]:
+                    logger.warning(f"Gemini model '{m}' returned {e.response.status_code} (high demand/unavailable). Trying fallback model...")
+                    continue
+                raise
+            except Exception as e:
+                last_exc = e
+                if m != models_to_try[-1]:
+                    logger.warning(f"Gemini model '{m}' failed: {e}. Trying fallback model...")
+                    continue
+                raise
+        if last_exc:
+            raise last_exc
 
     async def _call_together(self, history: List[Dict[str, str]]) -> str:
         """Call Together AI."""
@@ -184,7 +237,8 @@ class LLMClient:
         url = "https://api.groq.com/openai/v1/chat/completions"
         headers = {
             "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0"
         }
 
         messages = [{"role": "system", "content": settings.SYSTEM_PROMPT}] + history
@@ -192,8 +246,10 @@ class LLMClient:
         payload = {
             "model": settings.GROQ_MODEL,
             "messages": messages,
-            "max_tokens": 80,
-            "temperature": 0.7
+            "max_tokens": 160,
+            "temperature": 0.7,
+            "presence_penalty": 0.5,
+            "frequency_penalty": 0.5
         }
 
         client = await self._get_client()
